@@ -1,0 +1,24 @@
+githubConfigUrl: https://github.com/FortinetCloudCSE
+githubConfigSecret: arc-github-app
+runnerScaleSetName: org-runners
+minRunners: 0
+maxRunners: 30
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-ga-rs-controller
+containerMode:
+  type: dind
+template:
+  spec:
+    nodeSelector:
+      node-role: runner
+    containers:
+      - name: runner
+        image: 228122752878.dkr.ecr.us-east-1.amazonaws.com/fortinetcloudcse-arc-runner-image:latest
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"

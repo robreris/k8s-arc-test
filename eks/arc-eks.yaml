@@ -1,0 +1,78 @@
+# arc-eks.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: arc-eks
+  region: us-east-1
+  version: "1.31"   # EKS standard-support as of Aug 2025
+
+# Control plane & logging
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["audit", "controllerManager", "scheduler"]
+
+iam:
+  withOIDC: true   # required for IRSA (ARC, autoscaler, etc.)
+
+vpc:
+  cidr: 10.0.0.0/16
+  nat:
+    gateway: HighlyAvailable
+
+# Add-ons (let eksctl manage current platform-matched versions)
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver
+
+managedNodeGroups:
+  # Small, steady system pool for core services (ARC controller, DNS, etc.)
+  - name: system-ng
+    instanceTypes: ["m6i.large","m5.large","c6i.large","c5.large"]
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 4
+    labels: { "node-role": "system" }
+    preBootstrapCommands:
+      - |
+        set -euxo pipefail
+        # Install/ensure SSM Agent (AL2 vs AL2023 may already have it)
+        if ! systemctl status amazon-ssm-agent >/dev/null 2>&1; then
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm || true
+        fi
+        systemctl enable amazon-ssm-agent
+        systemctl start amazon-ssm-agent
+    tags:
+      "k8s.io/cluster-autoscaler/enabled": "true"
+      "k8s.io/cluster-autoscaler/arc-eks": "owned"
+
+  # Scalable worker pool for ARC runners (Linux container builds)
+  - name: runners-ng
+    # Use instance selector for flexibility; runners like CPU bursts
+    instanceSelector:
+      vCPUs: 4
+      memory: 8GiB
+      cpuArchitecture: x86_64
+    desiredCapacity: 0
+    minSize: 0
+    maxSize: 10
+    labels: { "node-role": "runner" }
+    taints: []   # leave untainted; ARC can add affinities if you want
+    privateNetworking: true
+    volumeSize: 80
+    preBootstrapCommands:
+      - |
+        set -euxo pipefail
+        # Same SSM bootstrapping if desired on runner nodes:
+        if ! systemctl status amazon-ssm-agent >/dev/null 2>&1; then
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm || true
+        fi
+        systemctl enable amazon-ssm-agent
+        systemctl start amazon-ssm-agent
+    ssh:
+      allow: false
+
+# (Optional) set cluster-wide tags used later by autoscalers
+availabilityZones: ["us-east-1a","us-east-1b","us-east-1c"]

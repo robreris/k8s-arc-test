@@ -1,0 +1,33 @@
+# Start from GitHub Actions runner image (pin a specific tag in production)
+FROM ghcr.io/actions/actions-runner:latest
+
+# Install OS deps
+USER root
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      curl unzip git jq python3 python3-pip ca-certificates gnupg lsb-release && \
+    rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2
+RUN curl -L "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip && \
+    unzip /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+
+# Terraform (pin to your preferred version)
+ARG TF_VERSION=1.9.5
+RUN curl -L "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip && \
+    unzip /tmp/terraform.zip -d /usr/local/bin && \
+    rm -f /tmp/terraform.zip && \
+    terraform -version
+
+# Optional: cfn-lint, yq, etc.
+RUN pip3 install --no-cache-dir cfn-lint && \
+    curl -L "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -o /usr/local/bin/yq && \
+    chmod +x /usr/local/bin/yq
+
+# The base image already includes the runner; ARC will handle registration.
+# If you need custom certs or configs, add them here.
+
+# Runner process runs as 'runner' in base image
+USER runner
