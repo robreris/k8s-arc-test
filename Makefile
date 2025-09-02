@@ -8,8 +8,8 @@ EKSCTL_CONFIG         ?= eks/arc-eks.yaml
 # Namespaces
 ESO_NS                ?= external-secrets
 ARC_SYS_NS            ?= arc-systems
-ARC_RUNNERS_NS        ?= actions-runner-system
-ARC_CONTROLLER_SA     ?= arc-ga-rs-controller
+ARC_RUNNERS_NS        ?= arc-runners
+ARC_CONTROLLER_SA     ?= gha-runner-scale-set-controller
 
 # ECR (pre-existing repo). Example: ECR_REPO=arc-runner-tools
 ECR_REPO              ?= fortinetcloudcse-arc-runner-image
@@ -24,7 +24,22 @@ GITHUB_APP_INSTALLATION_ID := $(shell yq -r '.InstallationID' gh-app-info)
 
 # Runners
 RUNNER_SET_NAME ?= org-runners
+RUNNER_GROUP_NAME ?= FortinetCloudCSEOrgRunners
 ARC_VALUES_FILE ?= eks/arc-runners.values.yaml
+
+# ARC chart version pins (optional)
+ARC_CONTROLLER_CHART_VERSION ?=
+ARC_RUNNERS_CHART_VERSION ?=
+ARC_CONTROLLER_CHART_FLAGS := $(if $(ARC_CONTROLLER_CHART_VERSION),--version $(ARC_CONTROLLER_CHART_VERSION),)
+ARC_RUNNERS_CHART_FLAGS := $(if $(ARC_RUNNERS_CHART_VERSION),--version $(ARC_RUNNERS_CHART_VERSION),)
+
+# Cluster Autoscaler
+CA_VERSION            ?= v1.33.0
+CA_BRANCH            := $(shell echo $(CA_VERSION) | sed -E 's/^v([0-9]+\.[0-9]+).*/cluster-autoscaler-release-\1/')
+CA_NAMESPACE          ?= kube-system
+CA_SA_NAME            ?= cluster-autoscaler
+CA_POLICY_NAME        ?= AmazonEKSClusterAutoscalerPolicy
+CA_POLICY_FILE        ?= eks/cluster-autoscaler-policy.json
 
 # Secrets Manager (single JSON secret with 3 keys)
 ESO_SECRET_NAME       ?= arc/github-ftntcldcse-arc-runner-app
@@ -58,8 +73,9 @@ endef
 # ============
 .PHONY: help up down cluster-create image-build image-push ecr-login \
         eso-install eso-iam-create eso-annotate-sa eso-apply-store \
-        sm-upsert externalsecret-apply arc-install arc-crds-apply arc-runners-apply \
-        prereqs
+        sm-upsert sm-validate externalsecret-apply arc-install arc-crds-apply arc-runners-apply \
+        ca-iam-create ca-deploy \
+        prereqs cluster-reset-soft cluster-reset
 
 help:
 	@echo "Targets:"
@@ -69,17 +85,65 @@ help:
 	@echo "  make image-build image-push"
 	@echo "  make eso-install eso-iam-create eso-annotate-sa eso-apply-store"
 	@echo "  make sm-upsert     - Create/Update Secrets Manager JSON for GitHub App"
+	@echo "  make sm-validate   - Validate secret JSON and show PEM header/footer"
 	@echo "  make externalsecret-apply"
-	@echo "  make arc-install arc-runners-apply"
+	@echo "  make arc-install arc-crds-apply arc-runners-apply"
+	@echo "  make ca-iam-create - Create CA IAM policy + IRSA service account"
+	@echo "  make ca-deploy      - Deploy Cluster Autoscaler $(CA_VERSION)"
+	@echo "  make cluster-reset-soft - Remove ARC/ESO/runner resources and CRDs; keep cluster"
+	@echo "  make cluster-reset      - Delete and recreate the cluster from $(EKSCTL_CONFIG) (DESTRUCTIVE)"
+
 
 up: prereqs cluster-create ecr-login image-build image-push \
     eso-install eso-iam-create eso-annotate-sa eso-apply-store \
-    sm-upsert externalsecret-apply arc-install arc-runners-apply
+    sm-upsert externalsecret-apply arc-install arc-crds-apply wait-arc-secret arc-runners-apply
 	@echo "✓ All done. Your ARC runners should register to https://github.com/$(GITHUB_ORG)"
 
 down:
-	@for STACK_NAME in $(aws cloudformation describe-stacks --query "Stacks[?Tags[?Key=='alpha.eksctl.io/cluster-name' && Value=='$$CLUSTER_NAME']].StackName" --output text); do aws cloudformation delete-stack --stack-name "$$STACK_NAME" --region "$$AWS_REGION"; done
+	@for STACK_NAME in $$(aws cloudformation describe-stacks --region $(AWS_REGION) --query "Stacks[?Tags[?Key=='alpha.eksctl.io/cluster-name' && Value=='$(CLUSTER_NAME)']].StackName" --output text); do \
+	  aws cloudformation delete-stack --stack-name $$STACK_NAME --region $(AWS_REGION); \
+	done
 	eksctl delete cluster -f $(EKSCTL_CONFIG)
+
+# ============
+# Reset helpers
+# ============
+
+.PHONY: cluster-reset-soft cluster-reset
+
+# Soft reset: uninstall ARC, ESO, runner scale set, Cluster Autoscaler; delete CRDs and namespaces.
+# Leaves the EKS cluster and managed nodegroups intact.
+cluster-reset-soft:
+	@echo "Uninstalling Helm releases (ignore errors if absent)..."
+	-helm -n $(ARC_RUNNERS_NS) uninstall $(RUNNER_SET_NAME)
+	-helm -n $(ARC_SYS_NS) uninstall arc
+	-helm -n $(ESO_NS) uninstall external-secrets
+	@echo "Deleting Cluster Autoscaler deployment if present..."
+	-kubectl -n $(CA_NAMESPACE) delete deploy cluster-autoscaler --ignore-not-found
+	@echo "Deleting ARC and ESO CRDs if present..."
+	-kubectl get crd autoscalingrunnersets.actions.github.com -o json | jq 'del(.metadata.finalizers)' | kubectl replace --raw "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/autoscalingrunnersets.actions.github.com" -f -
+	-kubectl get crd autoscalinglisteners.actions.github.com -o json | jq 'del(.metadata.finalizers)' | kubectl replace --raw "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/autoscalinglisteners.actions.github.com" -f -
+	-kubectl get crd ephemeralrunners.actions.github.com -o json | jq 'del(.metadata.finalizers)' | kubectl replace --raw "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/ephemeralrunners.actions.github.com" -f -
+	-kubectl get crd ephemeralrunnersets.actions.github.com -o json | jq 'del(.metadata.finalizers)' | kubectl replace --raw "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/ephemeralrunnersets.actions.github.com" -f -
+	-kubectl delete crd autoscalingrunnersets.actions.github.com autoscalinglisteners.actions.github.com --ignore-not-found
+	-kubectl delete crd ephemeralrunners.actions.github.com ephemeralrunnersets.actions.github.com --ignore-not-found
+	-kubectl delete crd externalsecrets.external-secrets.io secretstores.external-secrets.io clustersecretstores.external-secrets.io --ignore-not-found
+	@echo "Deleting namespaces used by ARC/ESO (ignore if already gone)..."
+	-kubectl delete ns $(ARC_RUNNERS_NS) $(ARC_SYS_NS) $(ESO_NS) --ignore-not-found
+	@echo "Delete cluster role and role bindings..."
+	-kubectl delete clusterrole arc-gha-rs-controller
+	-kubectl delete clusterrolebinding arc-gha-rs-controller
+	@echo "✓ Soft reset complete. Cluster remains with only eksctl-managed components."
+
+# Hard reset: fully delete and recreate the cluster from $(EKSCTL_CONFIG).
+# Requires explicit confirmation: make cluster-reset CONFIRM=yes
+cluster-reset: 
+	$(call guard,CONFIRM)
+	@echo "WARNING: This will DELETE and RECREATE the EKS cluster '$(CLUSTER_NAME)' in $(AWS_REGION)."
+	@echo "Proceeding with hard reset..."
+	$(MAKE) down
+	$(MAKE) cluster-create
+	@echo "✓ Cluster reset to match $(EKSCTL_CONFIG)."
 
 # ============
 # Step: cluster
@@ -120,6 +184,17 @@ eso-install:
 	helm repo update >/dev/null
 	helm upgrade --install external-secrets external-secrets/external-secrets \
 	  -n $(ESO_NS) --create-namespace --set installCRDs=true
+	# Wait for specific ESO CRDs without relying on bash arrays
+	required_crds="externalsecrets.external-secrets.io secretstores.external-secrets.io clustersecretstores.external-secrets.io"
+	for crd in $$required_crds; do \
+	  until kubectl get crd $$crd >/dev/null 2>&1; do \
+	    echo "Waiting for CRD $$crd..."; \
+	    sleep 1; \
+	  done; \
+	done
+	for crd in $$required_crds; do \
+	  kubectl wait --for=condition=Established crd/$$crd --timeout=120s; \
+	done
 	@echo "✓ ESO installed in namespace $(ESO_NS)."
 
 # Create IAM role & inline policy for ESO via IRSA
@@ -143,8 +218,11 @@ eso-annotate-sa:
 	  eks.amazonaws.com/role-arn=arn:aws:iam::$(ACCOUNT_ID):role/$(IAM_ROLE_NAME) --overwrite
 	@echo "✓ Annotated SA."
 
-eso-apply-store:
-	@test -f "$(CLUSTER_SECRETSTORE)" || (echo "Missing $(CLUSTER_SECRETSTORE)"; exit 1)
+eso-apply-store: clustersecretstore-file
+	@echo "Waiting on eso deployments..."
+	kubectl wait --for=condition=available deployment/external-secrets -n $(ESO_NS) --timeout=5m
+	kubectl wait --for=condition=available deployment/external-secrets-cert-controller -n $(ESO_NS) --timeout=5m
+	kubectl wait --for=condition=available deployment/external-secrets-webhook -n $(ESO_NS) --timeout=5m
 	kubectl apply -f $(CLUSTER_SECRETSTORE)
 	@echo "✓ ClusterSecretStore applied."
 
@@ -175,11 +253,31 @@ eso-trust-file:
 	'    "Principal": { "Federated": "arn:aws:iam::$(ACCOUNT_ID):oidc-provider/$(OIDC_PROVIDER)" },' \
 	'    "Action": "sts:AssumeRoleWithWebIdentity",' \
 	'    "Condition": {' \
-	'      "StringEquals": { "$(OIDC_PROVIDER):sub": "system:serviceaccount:$(ESO_NS):external-secrets" }' \
+	'      "StringEquals": { "$(OIDC_PROVIDER):aud": "sts.amazonaws.com", "$(OIDC_PROVIDER):sub": "system:serviceaccount:$(ESO_NS):external-secrets" }' \
 	'    }' \
 	'  }]' \
 	'}' > $(ESO_TRUST_FILE)
 	@echo "✓ Wrote $(ESO_TRUST_FILE)"
+
+# Generate ClusterSecretStore with current region and ESO namespace
+clustersecretstore-file:
+	@echo "Writing $(CLUSTER_SECRETSTORE) for ESO ns $(ESO_NS) in $(AWS_REGION)..."
+	@printf '%s\n' \
+	"apiVersion: external-secrets.io/v1" \
+	"kind: ClusterSecretStore" \
+	"metadata:" \
+	"  name: aws-secrets" \
+	"spec:" \
+	"  provider:" \
+	"    aws:" \
+	"      service: SecretsManager" \
+	"      region: $(AWS_REGION)" \
+	"      auth:" \
+	"        jwt:" \
+	"          serviceAccountRef:" \
+	"            name: external-secrets" \
+	"            namespace: $(ESO_NS)" \
+	> $(CLUSTER_SECRETSTORE)
 
 # ============
 # Step: Secrets Manager (store your GitHub App creds)
@@ -189,19 +287,38 @@ sm-upsert:
 	$(call guard,GITHUB_APP_INSTALLATION_ID)
 	@test -f "$(PEM_FILE)" || (echo "Missing $(PEM_FILE)"; exit 1)
 	@echo "Preparing JSON payload for Secrets Manager..."
-	@PEM_ESCAPED=$$(sed ':a;N;$$!ba;s/\n/\\n/g' $(PEM_FILE));
-	@printf '%s\n' \
-        '{' \
-	'  "github_app_id": "$(GITHUB_APP_ID)",' \
-	'  "github_app_installation_id": "$(GITHUB_APP_INSTALLATION_ID)",' \
-	'  "github_app_private_key": "$$PEM_ESCAPED"' \
-	'}' > /tmp/github-app.json 
+	@jq -n \
+	  --arg app_id "$(GITHUB_APP_ID)" \
+	  --arg app_inst_id "$(GITHUB_APP_INSTALLATION_ID)" \
+	  --rawfile pem "$(PEM_FILE)" \
+	  '{github_app_id:$$app_id, github_app_installation_id:$$app_inst_id, github_app_private_key:$$pem}' \
+	  > /tmp/github-app.json
 	@echo "Upserting secret $(ESO_SECRET_NAME) in Secrets Manager..."
 	@aws secretsmanager describe-secret --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" >/dev/null 2>&1 && \
 	  aws secretsmanager put-secret-value --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" --secret-string file:///tmp/github-app.json >/dev/null || \
 	  aws secretsmanager create-secret   --region $(AWS_REGION) --name "$(ESO_SECRET_NAME)" --secret-string file:///tmp/github-app.json >/dev/null
 	@rm -f /tmp/github-app.json
 	@echo "✓ Secrets Manager secret ready: $(ESO_SECRET_NAME)"
+
+# Validate the JSON secret in Secrets Manager and show PEM header/footer
+sm-validate:
+	$(call guard,ESO_SECRET_NAME)
+	@echo "Validating Secrets Manager secret: $(ESO_SECRET_NAME) in $(AWS_REGION)"
+	@secret=$$(aws secretsmanager get-secret-value --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" --query SecretString --output text) ; \
+	if echo "$$secret" | jq -e . >/dev/null 2>&1 ; then \
+	  echo "✓ Secret JSON parses" ; \
+	  echo "$$secret" | jq -er '(.github_app_id // "") != "" and (.github_app_installation_id // "") != "" and (.github_app_private_key // "") != ""' >/dev/null \
+	    && echo "✓ Required keys present" || (echo "ERROR: Missing required keys"; exit 1) ; \
+	  pem=$$(echo "$$secret" | jq -r '.github_app_private_key') ; \
+	else \
+	  echo "Secret is not JSON; treating SecretString as raw PEM" ; \
+	  pem="$$secret" ; \
+	fi ; \
+	echo "PEM header/footer:" ; \
+	printf '%s\n' "$$pem" | sed -n '1p;$$p' ; \
+	echo "PEM line count:" ; \
+	printf '%s\n' "$$pem" | wc -l | tr -d ' ' ; \
+	echo "Hint: Expect BEGIN/END lines above. If not, check how the secret was created."
 
 externalsecret-apply:
 	@mkdir -p eso
@@ -235,23 +352,40 @@ externalsecret-apply:
 	kubectl apply -f $(EXTERNALSECRET_FILE)
 	@echo "✓ ExternalSecret applied. ESO will sync arc-github-app in $(ARC_RUNNERS_NS)."
 
+.PHONY: wait-arc-secret
+wait-arc-secret:
+	@echo "Waiting for Secret arc-github-app in namespace $(ARC_RUNNERS_NS)..."
+	@i=0; until kubectl -n $(ARC_RUNNERS_NS) get secret arc-github-app >/dev/null 2>&1; do \
+	  i=$$((i+1)); \
+	  if [ $$i -gt 120 ]; then echo "Timeout waiting for arc-github-app Secret"; exit 1; fi; \
+	  echo "  - Secret not ready yet. Waiting..."; \
+	  sleep 2; \
+	done
+	@echo "✓ Secret arc-github-app is present in $(ARC_RUNNERS_NS)."
+
 # ============
 # Step: ARC (controller + your runner set)
 # ============
 arc-install:
 	helm upgrade --install arc \
 	  -n $(ARC_SYS_NS) --create-namespace \
+	  --set serviceAccount.create=true \
+	  --set serviceAccount.name=$(ARC_CONTROLLER_SA) \
+	  $(ARC_CONTROLLER_CHART_FLAGS) \
 	  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
-	@echo "✓ ARC controller installed in $(ARC_SYS_NS)."
+	@echo "Waiting for ARC controller pods to be Ready..."
+	kubectl -n $(ARC_SYS_NS) wait --for=condition=Ready pod -l app.kubernetes.io/name=gha-rs-controller --timeout=180s
+	@echo "✓ ARC controller installed and Ready in $(ARC_SYS_NS)."
 
 .PHONY: arc-crds-apply
 arc-crds-apply:
-	@echo "Installing ARC CRDs (RunnerScaleSet, etc.)..."
-	# Controller CRDs
-	helm show crds oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller | kubectl apply --server-side --force-conflicts -f -
-	# Runner Scale Set chart CRDs (safe if already applied)
-	helm show crds oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set | kubectl apply --server-side --force-conflicts -f -
-	@echo "✓ ARC CRDs installed."
+	@echo "Waiting for ARC CRDs (autoscalingrunnersets.actions.github.com)..."
+	until kubectl get crd autoscalingrunnersets.actions.github.com >/dev/null 2>&1; do \
+	  echo "  - CRD autoscalingrunnersets.actions.github.com not found yet. Waiting..."; \
+	  sleep 2; \
+	done
+	kubectl wait --for=condition=Established crd/autoscalingrunnersets.actions.github.com --timeout=180s
+	@echo "✓ ARC CRD autoscalingrunnersets.actions.github.com is Established."
 
 .PHONY: arc-values-file arc-runners-apply
 arc-values-file:
@@ -263,6 +397,10 @@ arc-values-file:
 	"runnerScaleSetName: $(RUNNER_SET_NAME)" \
 	"minRunners: 0" \
 	"maxRunners: 30" \
+	"runnerScaleSet:" \
+	"  runners:" \
+	"    labels:" \
+	"      - org-runners" \
 	"controllerServiceAccount:" \
 	"  namespace: $(ARC_SYS_NS)" \
 	"  name: $(ARC_CONTROLLER_SA)" \
@@ -271,18 +409,7 @@ arc-values-file:
 	"template:" \
 	"  spec:" \
 	"    nodeSelector:" \
-	"      node-role: runner" \
-	"    containers:" \
-	"      - name: runner" \
-	"        image: $(IMAGE_URI)" \
-	"        resources:" \
-	"          requests:" \
-	"            cpu: \"2\"" \
-	"            memory: \"4Gi\"" \
-	"          limits:" \
-	"            cpu: \"4\"" \
-	"            memory: \"8Gi\"" \
-	> $(ARC_VALUES_FILE)
+	"      node-role: runner" > $(ARC_VALUES_FILE)
 	@echo "✓ $(ARC_VALUES_FILE) updated."
 
 arc-runners-apply: arc-values-file
@@ -290,8 +417,51 @@ arc-runners-apply: arc-values-file
 	helm upgrade --install $(RUNNER_SET_NAME) \
 	  -n $(ARC_RUNNERS_NS) \
 	  -f $(ARC_VALUES_FILE) \
+	  $(ARC_RUNNERS_CHART_FLAGS) \
 	  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 	@echo "✓ Runner scale set '$(RUNNER_SET_NAME)' applied. Use 'runs-on: $(RUNNER_SET_NAME)'."
+
+# ============
+# Step: Cluster Autoscaler (IAM + IRSA + deploy)
+# ============
+.PHONY: ca-iam-create ca-deploy
+
+ca-iam-create:
+	$(call guard,ACCOUNT_ID)
+	@test -f "$(CA_POLICY_FILE)" || (echo "Missing $(CA_POLICY_FILE)"; exit 1)
+	@echo "Ensuring IAM policy $(CA_POLICY_NAME) exists..."
+	@aws iam get-policy --policy-arn arn:aws:iam::$(ACCOUNT_ID):policy/$(CA_POLICY_NAME) >/dev/null 2>&1 || \
+	  aws iam create-policy --policy-name $(CA_POLICY_NAME) --policy-document file://$(CA_POLICY_FILE) >/dev/null
+	@echo "✓ Policy ready: arn:aws:iam::$(ACCOUNT_ID):policy/$(CA_POLICY_NAME)"
+	@echo "Creating/Updating IRSA service account $(CA_NAMESPACE)/$(CA_SA_NAME) via eksctl..."
+	eksctl create iamserviceaccount \
+	  --cluster $(CLUSTER_NAME) \
+	  --namespace $(CA_NAMESPACE) \
+	  --name $(CA_SA_NAME) \
+	  --attach-policy-arn arn:aws:iam::$(ACCOUNT_ID):policy/$(CA_POLICY_NAME) \
+	  --override-existing-serviceaccounts \
+	  --approve
+	@echo "✓ IRSA service account ready: $(CA_NAMESPACE)/$(CA_SA_NAME)"
+
+ca-deploy:
+	@echo "Applying Cluster Autoscaler manifest $(CA_VERSION)..."
+	@branch="$(CA_BRANCH)"; \
+	url="https://raw.githubusercontent.com/kubernetes/autoscaler/$${branch}/cluster-autoscaler/cloudprovider/aws/examples/cluster-autoscaler-autodiscover.yaml"; \
+	echo "Using manifest: $$url"; \
+	kubectl apply -f "$$url"
+	@echo "Waiting for deployment/cluster-autoscaler to exist..."
+	@i=0; until kubectl -n $(CA_NAMESPACE) get deploy cluster-autoscaler >/dev/null 2>&1; do \
+	  i=$$((i+1)); if [ $$i -gt 60 ]; then echo "Timeout waiting for deployment/cluster-autoscaler"; exit 1; fi; \
+	  sleep 2; \
+	done
+	kubectl -n $(CA_NAMESPACE) set image deploy/cluster-autoscaler cluster-autoscaler=registry.k8s.io/autoscaling/cluster-autoscaler:$(CA_VERSION)
+	kubectl -n $(CA_NAMESPACE) set serviceaccount deploy/cluster-autoscaler $(CA_SA_NAME)
+	@echo "Setting stable args on deployment..."
+	@patch='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--cloud-provider=aws","--node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/$(CLUSTER_NAME)","--balance-similar-node-groups","--skip-nodes-with-local-storage=false","--skip-nodes-with-system-pods=false"]}]'; \
+	kubectl -n $(CA_NAMESPACE) patch deploy cluster-autoscaler --type=json -p="$$patch" || \
+	kubectl -n $(CA_NAMESPACE) patch deploy cluster-autoscaler --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args","value":["--cloud-provider=aws","--node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/$(CLUSTER_NAME)","--balance-similar-node-groups","--skip-nodes-with-local-storage=false","--skip-nodes-with-system-pods=false"]}]'
+	kubectl -n $(CA_NAMESPACE) annotate deploy/cluster-autoscaler cluster-autoscaler.kubernetes.io/safe-to-evict="false" --overwrite
+	@echo "✓ Cluster Autoscaler $(CA_VERSION) deployed. Verify with: kubectl -n $(CA_NAMESPACE) get deploy cluster-autoscaler"
 
 # ============
 # Sanity

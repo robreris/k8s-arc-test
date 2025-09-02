@@ -26,6 +26,15 @@ RUN pip3 install --no-cache-dir cfn-lint && \
     curl -L "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -o /usr/local/bin/yq && \
     chmod +x /usr/local/bin/yq
 
+# Docker CLI (for jobs using docker with containerMode: dind)
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $$VERSION_CODENAME) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce-cli docker-buildx-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
 # The base image already includes the runner; ARC will handle registration.
 # If you need custom certs or configs, add them here.
 

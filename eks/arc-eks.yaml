@@ -31,8 +31,8 @@ managedNodeGroups:
   # Small, steady system pool for core services (ARC controller, DNS, etc.)
   - name: system-ng
     instanceTypes: ["m6i.large","m5.large","c6i.large","c5.large"]
-    desiredCapacity: 2
-    minSize: 2
+    desiredCapacity: 1
+    minSize: 1
     maxSize: 4
     labels: { "node-role": "system" }
     preBootstrapCommands:
@@ -52,11 +52,11 @@ managedNodeGroups:
   - name: runners-ng
     # Use instance selector for flexibility; runners like CPU bursts
     instanceSelector:
-      vCPUs: 4
-      memory: 8GiB
+      vCPUs: 8
+      memory: 16GiB
       cpuArchitecture: x86_64
-    desiredCapacity: 0
-    minSize: 0
+    desiredCapacity: 1
+    minSize: 1
     maxSize: 10
     labels: { "node-role": "runner" }
     taints: []   # leave untainted; ARC can add affinities if you want
@@ -71,6 +71,9 @@ managedNodeGroups:
         fi
         systemctl enable amazon-ssm-agent
         systemctl start amazon-ssm-agent
+    tags:
+      "k8s.io/cluster-autoscaler/enabled": "true"
+      "k8s.io/cluster-autoscaler/arc-eks": "owned"
     ssh:
       allow: false
 
