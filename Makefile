@@ -56,7 +56,8 @@ CLUSTER_SECRETSTORE   ?= clustersecretstore-aws.yaml
 EXTERNALSECRET_FILE   ?= eso/externalsecret-arc-github-app.yaml
 
 # Derived
-ACCOUNT_ID            := $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+# Allow overriding the AWS account ID via make variable: `make ACCOUNT_ID=123456789012 <target>`
+ACCOUNT_ID            ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
 ECR_REGISTRY          := $(ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
 IMAGE_URI             := $(ECR_REGISTRY)/$(ECR_REPO):$(IMAGE_TAG)
 OIDC_ISSUER           := $(shell aws eks describe-cluster --name $(CLUSTER_NAME) --region $(AWS_REGION) --query "cluster.identity.oidc.issuer" --output text 2>/dev/null)
