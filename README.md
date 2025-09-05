@@ -149,8 +149,8 @@ make ca-deploy
 - Files under `eso/` and `clustersecretstore-aws.yaml` are generated or overwritten by Make targets.
 - Ensure `aws` default region matches `AWS_REGION` or pass `AWS_REGION=...` to Make.
 - If `sm-validate` complains about the PEM format, re-check the secret contents and quoting.
-
----
+- The GitHub App needs **Repository** Actions:Read-only and Metadata:Read-only and **Organization** Self-hosted runners: Read and write permissions.
+- When you configure GitHub Actions workflows, ensure 'runs-on' is set to whatever you've specified as **RUNNER_SET_NAME** in the Makefile. 
 
 For day‑to‑day, `make up` is the fastest path from empty to functional ARC runners on EKS. Adjust variables as needed per environment.
 
