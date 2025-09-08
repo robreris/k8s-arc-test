@@ -19,6 +19,8 @@ DOCKERFILE            ?= $(CONTEXT_DIR)/Dockerfile
 
 # GitHub org + GitHub App identifiers (from your App)
 GITHUB_ORG            ?= FortinetCloudCSE
+GITHUB_REPO           ?=
+GITHUB_URL            ?= https://github.com/$(GITHUB_ORG)$(if $(GITHUB_REPO),/$(GITHUB_REPO))
 GITHUB_APP_ID         := $(shell yq -r '.AppID' gh-app-info) 
 GITHUB_APP_INSTALLATION_ID := $(shell yq -r '.InstallationID' gh-app-info)
 
@@ -42,8 +44,8 @@ CA_POLICY_NAME        ?= AmazonEKSClusterAutoscalerPolicy
 CA_POLICY_FILE        ?= eks/cluster-autoscaler-policy.json
 
 # Secrets Manager (single JSON secret with 3 keys)
-ESO_SECRET_NAME       ?= arc/github-ftntcldcse-arc-runner-app
-PEM_FILE              ?= arc-org-runners.2025-08-29.private-key.pem
+ESO_SECRET_NAME       ?= arc/arc-runner-app
+PEM_FILE              ?= 
 
 # IAM for External Secrets Operator (IRSA)
 IAM_ROLE_NAME         ?= ESOSecretsManagerRole
@@ -74,7 +76,7 @@ endef
 # ============
 .PHONY: help up down cluster-create image-build image-push ecr-login \
         eso-install eso-iam-create eso-annotate-sa eso-apply-store \
-        sm-upsert sm-validate externalsecret-apply arc-install arc-crds-apply arc-runners-apply \
+        sm-upsert externalsecret-apply arc-install arc-crds-apply arc-runners-apply \
         ca-iam-create ca-deploy \
         prereqs cluster-reset-soft cluster-reset
 
@@ -86,7 +88,6 @@ help:
 	@echo "  make image-build image-push"
 	@echo "  make eso-install eso-iam-create eso-annotate-sa eso-apply-store"
 	@echo "  make sm-upsert     - Create/Update Secrets Manager JSON for GitHub App"
-	@echo "  make sm-validate   - Validate secret JSON and show PEM header/footer"
 	@echo "  make externalsecret-apply"
 	@echo "  make arc-install arc-crds-apply arc-runners-apply"
 	@echo "  make ca-iam-create - Create CA IAM policy + IRSA service account"
@@ -294,32 +295,15 @@ sm-upsert:
 	  --rawfile pem "$(PEM_FILE)" \
 	  '{github_app_id:$$app_id, github_app_installation_id:$$app_inst_id, github_app_private_key:$$pem}' \
 	  > /tmp/github-app.json
+	@# Compact to single line to avoid any CLI paramfile ambiguity
+	@jq -c . /tmp/github-app.json > /tmp/github-app.min.json
 	@echo "Upserting secret $(ESO_SECRET_NAME) in Secrets Manager..."
-	@aws secretsmanager describe-secret --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" >/dev/null 2>&1 && \
-	  aws secretsmanager put-secret-value --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" --secret-string file:///tmp/github-app.json >/dev/null || \
-	  aws secretsmanager create-secret   --region $(AWS_REGION) --name "$(ESO_SECRET_NAME)" --secret-string file:///tmp/github-app.json >/dev/null
-	@rm -f /tmp/github-app.json
+	@json_payload=$$(cat /tmp/github-app.min.json) ; \
+	  aws secretsmanager describe-secret --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" >/dev/null 2>&1 && \
+	  aws secretsmanager put-secret-value --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" --secret-string "$$json_payload" >/dev/null || \
+	  aws secretsmanager create-secret   --region $(AWS_REGION) --name "$(ESO_SECRET_NAME)" --secret-string "$$json_payload" >/dev/null
+	@rm -f /tmp/github-app.json /tmp/github-app.min.json
 	@echo "✓ Secrets Manager secret ready: $(ESO_SECRET_NAME)"
-
-# Validate the JSON secret in Secrets Manager and show PEM header/footer
-sm-validate:
-	$(call guard,ESO_SECRET_NAME)
-	@echo "Validating Secrets Manager secret: $(ESO_SECRET_NAME) in $(AWS_REGION)"
-	@secret=$$(aws secretsmanager get-secret-value --region $(AWS_REGION) --secret-id "$(ESO_SECRET_NAME)" --query SecretString --output text) ; \
-	if echo "$$secret" | jq -e . >/dev/null 2>&1 ; then \
-	  echo "✓ Secret JSON parses" ; \
-	  echo "$$secret" | jq -er '(.github_app_id // "") != "" and (.github_app_installation_id // "") != "" and (.github_app_private_key // "") != ""' >/dev/null \
-	    && echo "✓ Required keys present" || (echo "ERROR: Missing required keys"; exit 1) ; \
-	  pem=$$(echo "$$secret" | jq -r '.github_app_private_key') ; \
-	else \
-	  echo "Secret is not JSON; treating SecretString as raw PEM" ; \
-	  pem="$$secret" ; \
-	fi ; \
-	echo "PEM header/footer:" ; \
-	printf '%s\n' "$$pem" | sed -n '1p;$$p' ; \
-	echo "PEM line count:" ; \
-	printf '%s\n' "$$pem" | wc -l | tr -d ' ' ; \
-	echo "Hint: Expect BEGIN/END lines above. If not, check how the secret was created."
 
 externalsecret-apply:
 	@mkdir -p eso
@@ -393,7 +377,7 @@ arc-values-file:
 	@mkdir -p $(dir $(ARC_VALUES_FILE))
 	@echo "Writing $(ARC_VALUES_FILE)..."
 	@printf '%s\n' \
-	"githubConfigUrl: https://github.com/$(GITHUB_ORG)" \
+	"githubConfigUrl: $(GITHUB_URL)" \
 	"githubConfigSecret: arc-github-app" \
 	"runnerScaleSetName: $(RUNNER_SET_NAME)" \
 	"minRunners: 0" \
@@ -401,7 +385,7 @@ arc-values-file:
 	"runnerScaleSet:" \
 	"  runners:" \
 	"    labels:" \
-	"      - org-runners" \
+	"      - $(RUNNER_SET_NAME)" \
 	"controllerServiceAccount:" \
 	"  namespace: $(ARC_SYS_NS)" \
 	"  name: $(ARC_CONTROLLER_SA)" \

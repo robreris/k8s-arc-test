@@ -1,12 +1,12 @@
-githubConfigUrl: https://github.com/FortinetCloudCSE
+githubConfigUrl: https://github.com/robreris/test-arc
 githubConfigSecret: arc-github-app
-runnerScaleSetName: org-runners
+runnerScaleSetName: robs-runners
 minRunners: 0
 maxRunners: 30
 runnerScaleSet:
   runners:
     labels:
-      - org-runners
+      - robs-runners
 controllerServiceAccount:
   namespace: arc-systems
   name: gha-runner-scale-set-controller

@@ -23,7 +23,13 @@ This repo provisions a complete GitHub Actions Runner Controller (ARC) setup on 
 - CLI tools: `aws` (v2), `eksctl`, `kubectl`, `helm`, `docker`, `jq`, `yq`.
 - AWS: An account with permissions for EKS, IAM (roles/policies), ECR, and Secrets Manager.
 - Logged in to AWS (`aws sts get-caller-identity` works) and Docker.
-- A GitHub App installed for your org with private key downloaded.
+- A GitHub App installed for your org with private key downloaded. Permissions should be set as follows:
+  - If the runners will be scoped to a GitHub Organization, the app will need:
+    - **Repository** Actions:Read-only and Metadata:Read-only permissions
+    - **Organization** Self-hosted runners: Read and write permissions
+  - If the runners will be scoped to a single repo, the app will need: 
+    - **Repository** Actions:Read-only and Administration:Read and write
+    - **Organization** Self-hosted runners permissions
 
 ## Key Variables (overridable)
 
@@ -35,6 +41,7 @@ All variables have sensible defaults and can be overridden at invocation, for ex
 - `ECR_REPO`: ECR repo name for the runner tools image.
 - `IMAGE_TAG` (default `latest`): Tag for built image.
 - `GITHUB_ORG`: GitHub organization to connect ARC to.
+- `GITHUB_REPO` (optional): If scoping the runners to a repo instead of an organization, set this parameter to the repo name. 
 - `ESO_SECRET_NAME` (default `arc/github-ftntcldcse-arc-runner-app`): Name of the AWS Secrets Manager secret.
 - `PEM_FILE`: Path to your GitHub App private key file.
 - `IAM_ROLE_NAME`, `IAM_POLICY_NAME`: Names for ESO IRSA role and inline policy.
@@ -60,8 +67,8 @@ The Makefile prepares this JSON using values from `gh-app-info` (for `AppID` and
 
   ```bash
   cat > gh-app-info <<'EOF'
-  AppID: "123456"
-  InstallationID: "7890123"
+  AppID: 123456
+  InstallationID: 7890123
   EOF
   ```
 
@@ -97,7 +104,6 @@ When complete, runners should register to your org `https://github.com/${GITHUB_
 - `eso-annotate-sa`: Annotate ESO service account with the IRSA role ARN.
 - `eso-apply-store`: Apply the ClusterSecretStore and wait for ESO deployments.
 - `sm-upsert`: Upsert the Secrets Manager JSON from `gh-app-info` + `PEM_FILE`.
-- `sm-validate`: Validate the stored JSON and show PEM header/footer.
 - `externalsecret-apply`: Generate/apply ExternalSecret to create `arc-github-app`.
 - `arc-install`: Install ARC controller via Helm and wait for readiness.
 - `arc-crds-apply`: Ensure ARC CRDs exist/are established.
@@ -115,7 +121,7 @@ make prereqs
 make cluster-create
 make ecr-login image-build image-push
 make ACCOUNT_ID=123456789012 eso-install eso-iam-create eso-annotate-sa eso-apply-store
-make sm-upsert sm-validate
+make sm-upsert
 make externalsecret-apply
 make arc-install arc-crds-apply wait-arc-secret arc-runners-apply
 # Optional autoscaler
@@ -148,8 +154,6 @@ make ca-deploy
 - Overriding `ACCOUNT_ID` ensures generated ESO IAM policy/trust and annotations target the intended account.
 - Files under `eso/` and `clustersecretstore-aws.yaml` are generated or overwritten by Make targets.
 - Ensure `aws` default region matches `AWS_REGION` or pass `AWS_REGION=...` to Make.
-- If `sm-validate` complains about the PEM format, re-check the secret contents and quoting.
-- The GitHub App needs **Repository** Actions:Read-only and Metadata:Read-only and **Organization** Self-hosted runners: Read and write permissions.
 - When you configure GitHub Actions workflows, ensure 'runs-on' is set to whatever you've specified as **RUNNER_SET_NAME** in the Makefile. 
 
 For day‑to‑day, `make up` is the fastest path from empty to functional ARC runners on EKS. Adjust variables as needed per environment.
