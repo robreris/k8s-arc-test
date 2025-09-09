@@ -45,7 +45,7 @@ CA_POLICY_FILE        ?= eks/cluster-autoscaler-policy.json
 
 # Secrets Manager (single JSON secret with 3 keys)
 ESO_SECRET_NAME       ?= arc/arc-runner-app
-PEM_FILE              ?= 
+PEM_FILE              ?= arc-org-runners.2025-08-29.private-key.pem
 
 # IAM for External Secrets Operator (IRSA)
 IAM_ROLE_NAME         ?= ESOSecretsManagerRole
@@ -74,7 +74,7 @@ endef
 # ============
 # High-level
 # ============
-.PHONY: help up down cluster-create image-build image-push ecr-login \
+.PHONY: help up up-with-ca down cluster-create image-build image-push ecr-login \
         eso-install eso-iam-create eso-annotate-sa eso-apply-store \
         sm-upsert externalsecret-apply arc-install arc-crds-apply arc-runners-apply \
         ca-iam-create ca-deploy \
@@ -100,6 +100,8 @@ up: prereqs cluster-create ecr-login image-build image-push \
     eso-install eso-iam-create eso-annotate-sa eso-apply-store \
     sm-upsert externalsecret-apply arc-install arc-crds-apply wait-arc-secret arc-runners-apply
 	@echo "✓ All done. Your ARC runners should register to https://github.com/$(GITHUB_ORG)"
+
+up-with-ca: up ca-iam-create ca-deploy
 
 down:
 	@for STACK_NAME in $$(aws cloudformation describe-stacks --region $(AWS_REGION) --query "Stacks[?Tags[?Key=='alpha.eksctl.io/cluster-name' && Value=='$(CLUSTER_NAME)']].StackName" --output text); do \
@@ -187,7 +189,7 @@ eso-install:
 	helm upgrade --install external-secrets external-secrets/external-secrets \
 	  -n $(ESO_NS) --create-namespace --set installCRDs=true
 	# Wait for specific ESO CRDs without relying on bash arrays
-	required_crds="externalsecrets.external-secrets.io secretstores.external-secrets.io clustersecretstores.external-secrets.io"
+	required_crds="acraccesstokens.generators.external-secrets.io clusterexternalsecrets.external-secrets.io clustergenerators.generators.external-secrets.io clusterpushsecrets.external-secrets.io clustersecretstores.external-secrets.io ecrauthorizationtokens.generators.external-secrets.io externalsecrets.external-secrets.io fakes.generators.external-secrets.io gcraccesstokens.generators.external-secrets.io generatorstates.generators.external-secrets.io githubaccesstokens.generators.external-secrets.io grafanas.generators.external-secrets.io mfas.generators.external-secrets.io passwords.generators.external-secrets.io pushsecrets.external-secrets.io quayaccesstokens.generators.external-secrets.io secretstores.external-secrets.io sshkeys.generators.external-secrets.io stssessiontokens.generators.external-secrets.io uuids.generators.external-secrets.io vaultdynamicsecrets.generators.external-secrets.io webhooks.generators.external-secrets.io"
 	for crd in $$required_crds; do \
 	  until kubectl get crd $$crd >/dev/null 2>&1; do \
 	    echo "Waiting for CRD $$crd..."; \
@@ -225,7 +227,10 @@ eso-apply-store: clustersecretstore-file
 	kubectl wait --for=condition=available deployment/external-secrets -n $(ESO_NS) --timeout=5m
 	kubectl wait --for=condition=available deployment/external-secrets-cert-controller -n $(ESO_NS) --timeout=5m
 	kubectl wait --for=condition=available deployment/external-secrets-webhook -n $(ESO_NS) --timeout=5m
-	kubectl apply -f $(CLUSTER_SECRETSTORE)
+	until kubectl apply -f $(CLUSTER_SECRETSTORE); do \
+	  echo "Failed applying manifest, still waiting for CRDs, trying again in 5s..."; \
+	  sleep 5; \
+	done
 	@echo "✓ ClusterSecretStore applied."
 
 # Files (policy & trust) used above
@@ -352,7 +357,7 @@ wait-arc-secret:
 # Step: ARC (controller + your runner set)
 # ============
 arc-install:
-	helm upgrade --install arc \
+	helm upgrade --wait --install arc \
 	  -n $(ARC_SYS_NS) --create-namespace \
 	  --set serviceAccount.create=true \
 	  --set serviceAccount.name=$(ARC_CONTROLLER_SA) \
