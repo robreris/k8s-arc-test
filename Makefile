@@ -62,8 +62,8 @@ EXTERNALSECRET_FILE   ?= eso/externalsecret-arc-github-app.yaml
 ACCOUNT_ID            ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
 ECR_REGISTRY          := $(ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
 IMAGE_URI             := $(ECR_REGISTRY)/$(ECR_REPO):$(IMAGE_TAG)
-OIDC_ISSUER           := $(shell aws eks describe-cluster --name $(CLUSTER_NAME) --region $(AWS_REGION) --query "cluster.identity.oidc.issuer" --output text 2>/dev/null)
-OIDC_PROVIDER         := $(shell echo $(OIDC_ISSUER) | sed -e 's~^https://~~')
+OIDC_ISSUER           ?= $(shell aws eks describe-cluster --name $(CLUSTER_NAME) --region $(AWS_REGION) --query "cluster.identity.oidc.issuer" --output text 2>/dev/null)
+OIDC_PROVIDER         ?= $(shell echo $(OIDC_ISSUER) | sed -e 's~^https://~~')
 SECRET_ARN_PREFIX     := arn:aws:secretsmanager:$(AWS_REGION):$(ACCOUNT_ID):secret:$(ESO_SECRET_NAME)
 
 # Utility to guard required vars
@@ -156,10 +156,21 @@ cluster-create:
 	@test -f "$(EKSCTL_CONFIG)" || (echo "Missing $(EKSCTL_CONFIG)"; exit 1)
 	eksctl create cluster -f $(EKSCTL_CONFIG)
 	@echo "✓ Cluster created."
-	@echo "OIDC issuer: $(OIDC_ISSUER)"
+	$(MAKE) --no-print-directory wait-oidc-issuer
         
 get-cluster-oidc:
 	@echo "OIDC issuer: $(OIDC_ISSUER)"
+
+.PHONY: wait-oidc-issuer
+wait-oidc-issuer:
+	@echo "Waiting for OIDC_ISSUER to be available..."
+	@until OIDC_ISSUER=$$(aws eks describe-cluster --name $(CLUSTER_NAME) --region $(AWS_REGION) --query "cluster.identity.oidc.issuer" --output text 2>/dev/null); \
+	  [ -n "$$OIDC_ISSUER" ] && [ "$$OIDC_ISSUER" != "None" ]; do \
+	  echo "Waiting for OIDC_ISSUER to be available..."; \
+	  sleep 5; \
+	done; \
+	echo "OIDC Issuer: $$OIDC_ISSUER"
+	echo "OIDC Provider: $$OIDC_PROVIDER"
 
 # ============
 # Step: image
@@ -367,16 +378,6 @@ arc-install:
 	kubectl -n $(ARC_SYS_NS) wait --for=condition=Ready pod -l app.kubernetes.io/name=gha-rs-controller --timeout=180s
 	@echo "✓ ARC controller installed and Ready in $(ARC_SYS_NS)."
 
-.PHONY: arc-crds-apply
-arc-crds-apply:
-	@echo "Waiting for ARC CRDs (autoscalingrunnersets.actions.github.com)..."
-	until kubectl get crd autoscalingrunnersets.actions.github.com >/dev/null 2>&1; do \
-	  echo "  - CRD autoscalingrunnersets.actions.github.com not found yet. Waiting..."; \
-	  sleep 2; \
-	done
-	kubectl wait --for=condition=Established crd/autoscalingrunnersets.actions.github.com --timeout=180s
-	@echo "✓ ARC CRD autoscalingrunnersets.actions.github.com is Established."
-
 .PHONY: arc-values-file arc-runners-apply
 arc-values-file:
 	@mkdir -p $(dir $(ARC_VALUES_FILE))
@@ -404,11 +405,13 @@ arc-values-file:
 
 arc-runners-apply: arc-values-file
 	kubectl create ns $(ARC_RUNNERS_NS) --dry-run=client -o yaml | kubectl apply -f -
-	helm upgrade --install $(RUNNER_SET_NAME) \
-	  -n $(ARC_RUNNERS_NS) \
-	  -f $(ARC_VALUES_FILE) \
-	  $(ARC_RUNNERS_CHART_FLAGS) \
-	  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+	echo "Ensuring AutoScalingRunnerSets api resource ready..."
+	@until kubectl auth can-i create autoscalingrunnersets.actions.github.com -n $(ARC_RUNNERS_NS) >/dev/null 2>&1; do sleep 2; done
+	@until helm upgrade --install $(RUNNER_SET_NAME) -n $(ARC_RUNNERS_NS) -f $(ARC_VALUES_FILE) $(ARC_RUNNERS_CHART_FLAGS) \
+	  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set; do \
+	  echo "Failed applying $(RUNNER_SET_NAME) helm chart waiting for CRDs, re-trying..."; \
+	  sleep 2; \
+	done
 	@echo "✓ Runner scale set '$(RUNNER_SET_NAME)' applied. Use 'runs-on: $(RUNNER_SET_NAME)'."
 
 # ============
