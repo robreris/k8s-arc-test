@@ -1,4 +1,4 @@
-# FortinetCloudCSE GitHub Actions ARC Runners in EKS
+# FortinetCloudCSE GitHub Actions ARC Deployment in AWS EKS
 
 This repo provisions a complete GitHub Actions Runner Controller (ARC) setup on Amazon EKS, using External Secrets Operator (ESO) to source GitHub App credentials from AWS Secrets Manager. It also includes optional Cluster Autoscaler wiring and helpers to build/push a custom runner tools image.
 
