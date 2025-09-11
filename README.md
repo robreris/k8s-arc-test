@@ -61,7 +61,9 @@ The Makefile prepares this JSON using values from `gh-app-info` (for `AppID` and
 
 ## Quick Start (Everything)
 
-1) Prepare inputs
+1) [Create a Runner Group](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access) in your organization. Configure Repository and Workflow access as needed. Set the `RUNNER_GROUP_NAME` Makefile variable to the group name.
+
+2) Prepare inputs
 
 - Create a `gh-app-info` file with your GitHub App IDs:
 
@@ -74,7 +76,7 @@ The Makefile prepares this JSON using values from `gh-app-info` (for `AppID` and
 
 - Place your GitHub App private key PEM file at the path used by `PEM_FILE` (default example: `arc-org-runners.2025-08-29.private-key.pem`).
 
-2) Provision and deploy
+3) Provision and deploy
 
 - One-shot install of cluster, ESO + IRSA, secret, ARC, and runners:
 

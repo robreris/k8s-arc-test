@@ -2,3 +2,7 @@
 *.pem
 *gh-app-info*
 .kuberlr/
+eks/arc-runners.values.yaml
+eso/eso-secretsmanager-policy.json
+eso/eso-trust.json
+*clustersecretstore-aws.yaml

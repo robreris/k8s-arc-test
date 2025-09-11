@@ -17,9 +17,9 @@ IMAGE_TAG             ?= latest
 CONTEXT_DIR           ?= container
 DOCKERFILE            ?= $(CONTEXT_DIR)/Dockerfile
 
-# GitHub org + GitHub App identifiers (from your App)
+# GitHub org + GitHub App identifiers (from your App). Leave GITHUB_REPO unset unless altering deployment setup for a single repo scope.
 GITHUB_ORG            ?= FortinetCloudCSE
-GITHUB_REPO           ?=
+GITHUB_REPO           ?= 
 GITHUB_URL            ?= https://github.com/$(GITHUB_ORG)$(if $(GITHUB_REPO),/$(GITHUB_REPO))
 GITHUB_APP_ID         := $(shell yq -r '.AppID' gh-app-info) 
 GITHUB_APP_INSTALLATION_ID := $(shell yq -r '.InstallationID' gh-app-info)
@@ -386,6 +386,7 @@ arc-values-file:
 	"githubConfigUrl: $(GITHUB_URL)" \
 	"githubConfigSecret: arc-github-app" \
 	"runnerScaleSetName: $(RUNNER_SET_NAME)" \
+	"runnerGroup: $(RUNNER_GROUP_NAME)" \
 	"minRunners: 0" \
 	"maxRunners: 30" \
 	"runnerScaleSet:" \
